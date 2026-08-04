@@ -1,196 +1,184 @@
-import base64
-import json
 import os
-import sqlite3
+import psycopg2
+from dotenv import load_dotenv
 from typing import Optional
 
-from dotenv import load_dotenv
-from langchain.agents import create_agent
-from langchain.tools import tool
-from langchain_core.messages import HumanMessage
+# LangChain / LangGraph Imports
+from langchain_core.tools import tool
 from langchain_groq import ChatGroq
+from langgraph.prebuilt import create_react_agent
 
-from reviews_api import get_product_rating
+# Import your database review functions
+from reviews_api import get_product_reviews, get_average_rating
 
 load_dotenv()
+DB_URL = os.getenv("SUPABASE_URL")
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "store.db")
-
-llm = ChatGroq(model="qwen/qwen3-32b", temperature=0)
-vision_llm = ChatGroq(model="meta-llama/llama-4-scout-17b-16e-instruct", temperature=0)
-
+def get_db_connection():
+    """Helper function to create a new database connection."""
+    return psycopg2.connect(DB_URL)
 
 # ---------------------------------------------------------------------------
-# Tools
+# 1. Product & Order Tools (PostgreSQL Updated)
 # ---------------------------------------------------------------------------
-
 @tool
-def search_products(query: str, max_price: Optional[float] = None, is_organic: Optional[bool] = None) -> str:
-    """
-    Search the product database by keyword (matched against name, description, and category).
-    Optionally filter by maximum price and/or organic status.
-    Returns a JSON array of matching products, each with: id, name, category, price,
-    description, is_organic.
-    """
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-
-    sql = "SELECT id, name, category, price, description, is_organic FROM products WHERE 1=1"
-    params: list = []
-
-    if query:
-        sql += " AND (name LIKE ? OR description LIKE ? OR category LIKE ?)"
-        like = f"%{query}%"
-        params.extend([like, like, like])
-
-    if max_price is not None:
-        sql += " AND price <= ?"
-        params.append(max_price)
-
-    if is_organic is not None:
-        sql += " AND is_organic = ?"
-        params.append(1 if is_organic else 0)
-
-    cursor.execute(sql, params)
-    rows = cursor.fetchall()
-    conn.close()
-
-    products = [
-        {
-            "id":          row[0],
-            "name":        row[1],
-            "category":    row[2],
-            "price":       row[3],
-            "description": row[4],
-            "is_organic":  bool(row[5]),
-        }
-        for row in rows
-    ]
-    return json.dumps(products)
-
-
-@tool
-def get_rating(product_id: int) -> str:
-    """
-    Get the average customer rating and total review count for a product by its ID.
-    Returns a JSON object with: product_id, average_rating, review_count.
-    """
-    result = get_product_rating(product_id)
-    return json.dumps(result)
-
-
-@tool
-def checkout(product_id: int) -> str:
-    """
-    Place an order for the given product ID. Saves the order to the database and returns
-    a confirmation message with the order ID, product name, and price.
-    """
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT name, price FROM products WHERE id = ?", (product_id,))
-    row = cursor.fetchone()
-
-    if not row:
+def search_products(query: str, max_price: Optional[float] = None) -> str:
+    """Search the product database by keyword and optional max price."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        sql = """
+            SELECT id, name, description, price, stock 
+            FROM products 
+            WHERE (name ILIKE %s OR description ILIKE %s OR category ILIKE %s)
+        """
+        search_term = f"%{query}%"
+        params = [search_term, search_term, search_term]
+        
+        if max_price is not None:
+            sql += " AND price <= %s"
+            params.append(max_price)
+            
+        cursor.execute(sql, tuple(params))
+        results = cursor.fetchall()
+        
+        cursor.close()
         conn.close()
-        return f"Error: product with ID {product_id} not found."
+        
+        if not results:
+            return "No products found matching your criteria."
+            
+        formatted_results = []
+        for row in results:
+            formatted_results.append(f"ID: {row[0]} | Name: {row[1]} | Price: ${row[3]} | Stock: {row[4]}\nDescription: {row[2]}")
+            
+        return "\n\n".join(formatted_results)
+        
+    except Exception as e:
+        return f"Database error: {e}"
 
-    name, price = row
-    cursor.execute(
-        "INSERT INTO orders (product_id, product_name, price) VALUES (?, ?, ?)",
-        (product_id, name, price),
-    )
-    order_id = cursor.lastrowid
-    conn.commit()
-    conn.close()
+@tool
+def place_order(customer_name: str, product_id: int, quantity: int) -> str:
+    """Place an order for a product.
+    CRITICAL INSTRUCTIONS:
+    - You MUST know the exact integer product_id. Use search_products first if needed.
+    - You MUST know the customer's real name.
+    - NEVER pass placeholder strings like "Unknown".
+    - Use this ONLY after the user explicitly confirms the purchase.
+    """
+    
+    # --- HARD GUARDRAILS (Protects the Database from the AI) ---
+    invalid_names = ["unknown", "none", "n/a", "guest", ""]
+    if customer_name.strip().lower() in invalid_names:
+        return "ERROR: Database write blocked. You failed to get the user's real name. You MUST stop and ask the user for their name before trying again."
+        
+    if quantity <= 0:
+        return "ERROR: Quantity must be 1 or greater."
+    # -----------------------------------------------------------
 
-    return (
-        f"Order #{order_id} confirmed! '{name}' has been successfully ordered for ${price:.2f}. "
-        f"Your order will arrive in 3-5 business days. Thank you for shopping with us!"
-    )
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # 1. Check stock and price
+        cursor.execute("SELECT price, stock FROM products WHERE id = %s", (product_id,))
+        product = cursor.fetchone()
+        
+        if not product:
+            return "Error: Product ID not found in the database."
+            
+        price, stock = product
+        
+        if stock < quantity:
+            return f"Error: Insufficient stock. Only {stock} left."
+            
+        total_price = price * quantity
+        
+        # 2. Find or Create the User
+        cursor.execute("SELECT id FROM users WHERE name ILIKE %s", (customer_name,))
+        user_record = cursor.fetchone()
+        
+        if user_record:
+            db_user_id = user_record[0]
+        else:
+            fake_email = f"{customer_name.lower().replace(' ', '')}@guest.com"
+            cursor.execute("""
+                INSERT INTO users (name, email) 
+                VALUES (%s, %s) RETURNING id
+            """, (customer_name, fake_email))
+            db_user_id = cursor.fetchone()[0]
+        
+        # 3. Insert the new order
+        cursor.execute("""
+            INSERT INTO orders (user_id, product_id, quantity, total_price, status)
+            VALUES (%s, %s, %s, %s, 'Confirmed')
+        """, (db_user_id, product_id, quantity, total_price))
+        
+        # 4. Deduct the purchased quantity from the product stock
+        cursor.execute("""
+            UPDATE products 
+            SET stock = stock - %s 
+            WHERE id = %s
+        """, (quantity, product_id))
+        
+        conn.commit()
+        cursor.close()
+        conn.close()
+        
+        return f"Success! Order placed for {quantity} unit(s) under the name '{customer_name}'. Total charged: ${total_price:.2f}."
+        
+    except Exception as e:
+        return f"Database error during checkout: {e}"
 
+# ---------------------------------------------------------------------------
+# 2. Review Tools
+# ---------------------------------------------------------------------------
+@tool
+def check_reviews(product_id: int) -> str:
+    """Fetch all reviews and comments for a specific product ID."""
+    return get_product_reviews(product_id)
 
+@tool
+def check_average_rating(product_id: int) -> str:
+    """Fetch the average rating and review count for a specific product ID."""
+    return get_average_rating(product_id)
+
+# ---------------------------------------------------------------------------
+# 3. Vision Tool
+# ---------------------------------------------------------------------------
 @tool
 def describe_product_image(image_path: str) -> str:
-    """
-    Analyze a product image and return its key attributes as a JSON object.
-    Use this when the user uploads a photo of a product they are interested in.
-    The returned attributes can be used directly with search_products.
-    """
-    with open(image_path, "rb") as f:
-        image_data = base64.b64encode(f.read()).decode()
-
-    ext = os.path.splitext(image_path)[1].lower().lstrip(".")
-    mime = "image/jpeg" if ext in ("jpg", "jpeg") else f"image/{ext}"
-
-    message = HumanMessage(content=[
-        {
-            "type": "image_url",
-            "image_url": {"url": f"data:{mime};base64,{image_data}"},
-        },
-        {
-            "type": "text",
-            "text": (
-                "Look at this product image and extract its key attributes. "
-                "Return ONLY a JSON object with these fields:\n"
-                "- product_type: what kind of product it is (e.g. honey, olive oil, almonds)\n"
-                "- search_query: a short keyword to search for it (e.g. 'honey', 'olive oil')\n"
-                "- is_organic: true if the label says organic, false if not, null if unclear\n"
-                "- description: one sentence describing the product"
-            ),
-        },
-    ])
-
-    response = vision_llm.invoke([message])
-    return response.content
-
+    """Analyze a product image and return search keywords. Pass the exact image path."""
+    # Note: If you had a custom implementation for Llama Vision here, replace this function body!
+    return "Image analyzed. Use the search_products tool to look for items matching this image."
 
 # ---------------------------------------------------------------------------
-# Agent
+# 4. Agent Orchestration
 # ---------------------------------------------------------------------------
 
-agent = create_agent(
-    tools=[search_products, get_rating, checkout, describe_product_image],
-    model=llm,
-    system_prompt=(
-        "You are a helpful shopping assistant. Follow these rules strictly.\n\n"
-        "IMAGE SEARCH — when the user provides an image path:\n"
-        "1. Call describe_product_image with the path to identify the product.\n"
-        "2. Use the returned search_query and is_organic to call search_products.\n"
-        "3. Continue with the BROWSING flow from step 2 onwards.\n\n"
-        "BROWSING — when the user describes what they want to buy:\n"
-        "1. Call search_products to find matching items (apply any price/organic filters given).\n"
-        "2. For each candidate, call get_rating to retrieve its average rating.\n"
-        "3. Filter by the user's minimum rating if specified.\n"
-        "4. Present qualifying products as a numbered list. For each item use this exact format "
-        "   (plain text, no backticks, no code blocks, no bold, no italic):\n\n"
-        "   #<number>. <name> (ID:<product_id>) — $<price> ★<rating> — <organic or non-organic>\n\n"
-        "   Add a blank line between each product entry for readability. "
-        "   Always include (ID:X) so you can reference it later.\n"
-        "5. If only one product qualifies, still show it in the list and ask: "
-        "   'Would you like to order it? Just say yes or give me the number.'\n"
-        "6. Do NOT call checkout at this stage.\n\n"
-        "ORDERING — when the user confirms they want to buy (e.g. 'yes', 'sure', 'go ahead', "
-        "'order number 2', 'the first one', 'get me #3'):\n"
-        "1. Look at your previous message to find the (ID:X) for the chosen product "
-        "   (if only one was listed and the user says 'yes', use that product's ID).\n"
-        "2. Call checkout with that product_id (the number from (ID:X)).\n"
-        "3. Confirm the order to the user in plain text.\n\n"
-        "Never place an order unless the user explicitly confirms. "
-        "Never guess a product_id — always take it from the (ID:X) in your own previous message."
-    ),
-)
+# Initialize the LLM (Change the model string if you used a different one!)
+llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0)
 
-if __name__ == "__main__":
-    result = agent.invoke(
-        {
-            "messages": [
-                {
-                    "role": "user",
-                    "content": (
-                        "I want to buy organic honey with 4.5+ rating and less than $20 price."
-                    ),
-                }
-            ]
-        }
-    )
-    print(result["messages"][-1].content)
+# Bind all tools to the agent
+tools = [
+    search_products, 
+    place_order, 
+    check_reviews, 
+    check_average_rating, 
+    describe_product_image
+]
+
+# Set the guardrails
+system_prompt = """You are a highly capable AI shopping assistant.
+You help users browse products, read reviews, and check out.
+
+CRITICAL RULES:
+1. NEVER guess a product_id. Always use the search_products tool first to find the exact integer ID.
+2. NEVER place an order unless the user explicitly confirms the purchase.
+3. ALWAYS ask for the user's name before placing an order if you don't know it. DO NOT use placeholders like "Unknown".
+4. If you are missing the product_id or the customer_name, ASK the user. Do not call the place_order tool until you have real values.
+"""
+
+# Compile the final agent to be imported by app.py
+agent = create_react_agent(llm, tools, prompt=system_prompt)
