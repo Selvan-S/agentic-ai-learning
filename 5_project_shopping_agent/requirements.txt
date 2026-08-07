@@ -5,6 +5,7 @@ langgraph
 psycopg2-binary
 python-dotenv
 chromadb
+langchain-chroma
+langchain-huggingface
 sentence-transformers
-langchain-community
 pillow
