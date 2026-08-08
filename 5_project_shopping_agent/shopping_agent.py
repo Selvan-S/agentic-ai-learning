@@ -148,7 +148,7 @@ def describe_product_image(image_path: str) -> str:
 # ---------------------------------------------------------------------------
 # 4. Agent Orchestration
 # ---------------------------------------------------------------------------
-llm = ChatGroq(model="llama-3.1-8b-instant", temperature=0)
+llm = ChatGroq(model="openai/gpt-oss-20b", temperature=0)
 
 tools = [
     search_products, 
