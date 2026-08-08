@@ -8,7 +8,7 @@ from typing import Optional
 from langchain_core.tools import tool
 from langchain_groq import ChatGroq
 from langgraph.prebuilt import create_react_agent
-from langchain_community.vectorstores import Chroma
+from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 
 # Import your database review functions

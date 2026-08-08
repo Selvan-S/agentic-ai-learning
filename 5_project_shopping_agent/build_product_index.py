@@ -1,5 +1,5 @@
 import sqlite3
-from langchain_community.vectorstores import Chroma
+from langchain_chroma import Chroma
 from langchain_community.embeddings import OllamaEmbeddings # Replace with OpenAIEmbeddings if you are using OpenAI
 
 def build_vector_db():
