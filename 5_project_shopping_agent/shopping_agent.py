@@ -16,7 +16,9 @@ from reviews_api import get_product_reviews, get_average_rating
 
 load_dotenv()
 DB_URL = os.getenv("SUPABASE_URL")
-PERSIST_DIRECTORY = "./chroma_db"
+# Dynamically resolve path to chroma_db relative to this file's location
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PERSIST_DIRECTORY = os.path.join(BASE_DIR, "chroma_db")
 
 def get_db_connection():
     return psycopg2.connect(DB_URL)

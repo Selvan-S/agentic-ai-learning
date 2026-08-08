@@ -7,7 +7,9 @@ from langchain_huggingface import HuggingFaceEmbeddings
 
 load_dotenv()
 DB_URL = os.getenv("SUPABASE_URL")
-PERSIST_DIRECTORY = "./chroma_db"
+# Dynamically resolve path to chroma_db relative to this file's location
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PERSIST_DIRECTORY = os.path.join(BASE_DIR, "chroma_db")
 
 def fetch_products_from_supabase():
     """Pulls all products from your Supabase cloud database."""
