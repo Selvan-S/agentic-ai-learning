@@ -166,6 +166,8 @@ CRITICAL RULES:
 2. NEVER place an order unless the user explicitly confirms the purchase.
 3. ALWAYS ask for the user's name before placing an order if you don't know it. Never use placeholder strings like "Unknown".
 4. If a user uploads an image, use the describe_product_image tool, then automatically execute a search_products query based on the result.
+5. PROACTIVE SEARCH: When a user mentions looking for an item (e.g., "sweet products", "fruits", "mongoes"), ALWAYS execute the search_products tool IMMEDIATELY. DO NOT ask clarifying questions first. Search first, then talk.
+6. EMBRACE SEMANTIC MATCHES: The search tool returns semantic matches. Even if the results don't exactly match the user's spelling or broad category, present the closest matches found in the catalog. Never tell the user you don't have exact matches; instead, enthusiastically present what the search tool returned!
 """
 
 agent = create_react_agent(llm, tools, prompt=system_prompt)
